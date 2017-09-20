@@ -11,6 +11,7 @@ const Serverless = require('serverless');
 // Mocks
 const childProcessMockFactory = require('./mocks/child_process.mock');
 const fsExtraMockFactory = require('./mocks/fs-extra.mock');
+const fsMockFactory = require('./mocks/fs.mock');
 const packageMock = require('./mocks/package.mock.json');
 
 chai.use(require('chai-as-promised'));
@@ -23,11 +24,9 @@ describe('packExternalModules', () => {
   let baseModule;
   let serverless;
   let module;
-
-  // Mocks
-  let npmMock;
   let childProcessMock;
   let fsExtraMock;
+  let fsMock;
   // Serverless stubs
   let writeFileSyncStub;
 
@@ -37,11 +36,12 @@ describe('packExternalModules', () => {
 
     childProcessMock = childProcessMockFactory.create(sandbox);
     fsExtraMock = fsExtraMockFactory.create(sandbox);
+    fsMock = fsMockFactory.create(sandbox);
 
     mockery.enable({ warnOnUnregistered: false });
-    mockery.registerMock('npm-programmatic', npmMock);
     mockery.registerMock('child_process', childProcessMock);
     mockery.registerMock('fs-extra', fsExtraMock);
+    mockery.registerMock('fs', fsMock);
     mockery.registerMock(path.join(process.cwd(), 'package.json'), packageMock);
     baseModule = require('../lib/packExternalModules');
     Object.freeze(baseModule);
@@ -200,6 +200,7 @@ describe('packExternalModules', () => {
         'uuid',
       ];
       module.webpackOutputPath = 'outputPath';
+      fsMock.access.yields(null);
       fsExtraMock.copy.yields();
       childProcessMock.exec.onFirstCall().yields(null, JSON.stringify(graphDependency), '');
       childProcessMock.exec.onSecondCall().yields();
@@ -226,110 +227,48 @@ describe('packExternalModules', () => {
       ]));
     });
     // @TODO should reject if fs fails
-    it('should reject if npm install fails', () => {
-      module.webpackOutputPath = 'outputPath';
-      npmMock.install.returns(BbPromise.reject(new Error('npm install failed')));
-      fsExtraMock.copy.yields();
-      childProcessMock.exec.onFirstCall().yields(null, '{}', '');
-      childProcessMock.exec.onSecondCall().yields();
-      return expect(module.packExternalModules(stats)).to.be.rejectedWith('npm install failed')
-      .then(() => BbPromise.all([
-        // npm install should have been called with all externals from the package mock
-        expect(npmMock.install).to.have.been.calledOnce,
-        // npm ls and npm prune should have been called
-        expect(childProcessMock.exec).to.have.been.calledOnce,
-      ]));
-    });
-
-    it('should reject if npm returns a critical error', () => {
-      const stderr = 'ENOENT: No such file';
-      module.webpackOutputPath = 'outputPath';
-      npmMock.install.returns(BbPromise.resolve());
-      fsExtraMock.copy.yields();
-      childProcessMock.exec.yields(new Error('something went wrong'), '{}', stderr);
-      return expect(module.packExternalModules(stats)).to.be.rejectedWith('something went wrong')
-      .then(() => BbPromise.all([
-        expect(npmMock.install).to.not.have.been.called,
-        // The module package JSON and the composite one should have been stored
-        expect(writeFileSyncStub).to.not.have.been.called,
-        // The modules should have been copied
-        expect(fsExtraMock.copy).to.not.have.been.called,
-        // npm ls and npm prune should have been called
-        expect(childProcessMock.exec).to.have.been.calledOnce,
-        expect(childProcessMock.exec.firstCall).to.have.been.calledWith(
-          'npm ls -prod -json -depth=1'
-        ),
-      ]));
-    });
-
-    it('should ignore minor local NPM errors and log them', () => {
-      const expectedPackageJSON = {
+    it('should reject if copy fails', () => {
+      const graphDependency = {
+        name: 'module',
         dependencies: {
-          '@scoped/vendor': '1.0.0',
-          uuid: '^5.4.1',
-          bluebird: '^3.4.0'
+          '@scoped/vendor': {
+            version: '1.0.0',
+          },
+          'bluebird': {
+            version: '1.0.0',
+          },
+          'uuid': {
+            version: '2.3.4',
+            dependencies: {
+              'dependency1': {
+                version: '5.4.3',
+                dependencies: {
+                  '@dependency2/scoped': {
+                    version: '2.1.4',
+                  },
+                },
+              },
+            }
+          },
         }
       };
-      const stderr = _.join(
-        [
-          'npm ERR! extraneous: sinon@2.3.8 ./babel-dynamically-entries/node_modules/serverless-webpack/node_modules/sinon',
-          'npm ERR! missing: internalpackage-1@1.0.0, required by internalpackage-2@1.0.0',
-          'npm ERR! peer dep missing: sinon@2.3.8',
-        ],
-        '\n'
-      );
-      const lsResult = {
-        version: '1.0.0',
-        problems: [
-          'npm ERR! extraneous: sinon@2.3.8 ./babel-dynamically-entries/node_modules/serverless-webpack/node_modules/sinon',
-          'npm ERR! missing: internalpackage-1@1.0.0, required by internalpackage-2@1.0.0',
-          'npm ERR! peer dep missing: sinon@2.3.8',
-        ],
-        dependencies: {
-          '@scoped/vendor': '1.0.0',
-          uuid: '^5.4.1',
-          bluebird: '^3.4.0'
-        }
-      };
-
       module.webpackOutputPath = 'outputPath';
-      npmMock.install.returns(BbPromise.resolve());
-      fsExtraMock.copy.yields();
-      childProcessMock.exec.onFirstCall().yields(new Error('NPM error'), JSON.stringify(lsResult), stderr);
+      fsMock.access.yields(null);
+      fsExtraMock.copy.yields(new Error('error copying'));
+      childProcessMock.exec.onFirstCall().yields(null, JSON.stringify(graphDependency), '');
       childProcessMock.exec.onSecondCall().yields();
-      return expect(module.packExternalModules(stats)).to.be.fulfilled
+      return expect(module.packExternalModules(stats)).to.be.rejectedWith('error copying')
       .then(() => BbPromise.all([
         // npm install should have been called with all externals from the package mock
-        expect(npmMock.install).to.have.been.calledOnce,
-        expect(npmMock.install).to.have.been.calledWithExactly([
-          '@scoped/vendor@1.0.0',
-          'uuid@^5.4.1',
-          'bluebird@^3.4.0'
-        ],
-        {
-          cwd: path.join('outputPath', 'dependencies'),
-          maxBuffer: 204800,
-          save: true
-        }),
-        // The module package JSON and the composite one should have been stored
-        expect(writeFileSyncStub).to.have.been.calledTwice,
-        expect(writeFileSyncStub.firstCall.args[1]).to.equal('{}'),
-        expect(writeFileSyncStub.secondCall.args[1]).to.equal(JSON.stringify(expectedPackageJSON, null, 2)),
-        // The modules should have been copied
-        expect(fsExtraMock.copy).to.have.been.calledOnce,
+        expect(fsExtraMock.copy).to.have.been.called,
         // npm ls and npm prune should have been called
-        expect(childProcessMock.exec).to.have.been.calledTwice,
-        expect(childProcessMock.exec.firstCall).to.have.been.calledWith(
-          'npm ls -prod -json -depth=1'
-        ),
-        expect(childProcessMock.exec.secondCall).to.have.been.calledWith(
-          'npm prune'
-        )
+        expect(childProcessMock.exec).to.have.been.calledOnce,
       ]));
     });
 
     it('should not install modules if no external modules are reported', () => {
       module.webpackOutputPath = 'outputPath';
+      fsMock.access.yields(null);
       fsExtraMock.copy.yields();
       childProcessMock.exec.yields(null, '{}', '');
       return expect(module.packExternalModules(noExtStats)).to.be.fulfilled
@@ -341,6 +280,22 @@ describe('packExternalModules', () => {
         expect(fsExtraMock.copy).to.not.have.been.called,
         // npm ls and npm prune should have been called
         expect(childProcessMock.exec).to.have.been.calledOnce,
+      ]));
+    });
+
+    it('should throw an error if there is no node_modules on cwd', () => {
+      module.webpackOutputPath = 'outputPath';
+      fsMock.access.yields(new Error('Error'));
+      fsExtraMock.copy.yields();
+      childProcessMock.exec.yields(null, '{}', '');
+      return expect(module.packExternalModules(noExtStats)).to.be.rejectedWith('There isn\'t node_modules or i\'ts not readable. Maybe you should run \'npm install\'')
+      .then(() => BbPromise.all([
+        // The module package JSON and the composite one should have been stored
+        expect(writeFileSyncStub).to.not.have.been.called,
+        // The modules should have been copied
+        expect(fsExtraMock.copy).to.not.have.been.called,
+        // npm ls and npm prune should have been called
+        expect(childProcessMock.exec).to.not.have.been.called,
       ]));
     });
   });
